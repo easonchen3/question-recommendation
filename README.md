@@ -10,7 +10,8 @@
 
 ```text
 prompts/
-  next_step_question_recommendation_prompt.md
+  next_step_question_recommendation_system_prompt.txt
+  next_step_question_recommendation_user_prompt.txt
 src/
   next_question_reco/
     __init__.py
@@ -19,6 +20,8 @@ evals/
   generate_eval_set.py
   run_eval.py
   next_step_eval_v1.jsonl
+  next_step_eval_v2.jsonl
+  next_step_eval_v3.jsonl
 requirements.txt
 ```
 
@@ -32,15 +35,17 @@ requirements.txt
 - 要避免与历史高频问题过于相似
 - 只输出 Top3
 
-Prompt 模板见 [prompts/next_step_question_recommendation_prompt.md](/D:/Code/questio_recommendation/prompts/next_step_question_recommendation_prompt.md)。
+Prompt 模板见：
+- [next_step_question_recommendation_system_prompt.txt](/D:/Code/questio_recommendation/prompts/next_step_question_recommendation_system_prompt.txt)
+- [next_step_question_recommendation_user_prompt.txt](/D:/Code/questio_recommendation/prompts/next_step_question_recommendation_user_prompt.txt)
 
 ## 评测集设计
 
-评测集共 120 条，覆盖三类意图：
+当前推荐使用 `v3` 评测集，共 120 条，覆盖三类产品意图：
 
-- `知识问答`：36 条
-- `故障诊断`：48 条
-- `智能问数`：36 条
+- `知识问答`
+- `网络监控`
+- `故障处理`
 
 难度分布：
 
@@ -50,9 +55,18 @@ Prompt 模板见 [prompts/next_step_question_recommendation_prompt.md](/D:/Code/
 
 设计逻辑：
 
-- 使用通信领域常见场景，如 5G 注册失败、VoLTE 掉话、PON 大面积离线、回传丢包、区域流量突增、投诉与 KPI 关联分析等
+- 使用通信领域常见场景，并收敛到产品实际意图类型：`知识问答`、`网络监控`、`故障处理`
 - 每条样本都包含原始问题、改写问题、意图、用户特征、当前计划、执行结果、历史高频问题
-- 其中包含一部分多意图样本，用于模拟真实场景中 `故障诊断+智能问数`、`知识问答+故障诊断` 等复合意图输入
+- 用户特征只使用三类角色：
+  - `网络监控工程师`
+  - `网络规划工程师`
+  - `网络维护工程师`
+- 用户特征中加入三类术语画像：
+  - `地理术语`
+  - `网络术语`
+  - `业务术语`
+- `execution_result` 改为更真实的多句结果，包含已完成动作、当前发现、尚未解决点和补充判断
+- 去除了厂家维度，不再使用 `vendor` 类字段
 - Gold 参考答案为“合理的下一步问题 Top3”，不是唯一标准答案，评测时使用 LLM-as-a-Judge 做语义判断
 - 保证部分样本缺省用户特征、缺省历史问题或计划信息，模拟真实线上输入质量
 
@@ -75,7 +89,7 @@ pip install -r requirements.txt
 ## 生成评测集
 
 ```bash
-python evals/generate_eval_set.py --output evals/next_step_eval_v1.jsonl
+python evals/generate_eval_set.py --output evals/next_step_eval_v3.jsonl
 ```
 
 ## 运行评测
@@ -112,4 +126,47 @@ python evals/run_eval.py ^
 
 ```bash
 python evals/run_eval.py --dataset evals/next_step_eval_v1.jsonl --dry-run
+```
+
+## 统一模式与 `config.json`
+
+现在 `evals/run_eval.py` 同时支持三种模式：
+
+- `generate`：只生成评测集
+- `evaluate`：只对已有评测集做评测
+- `generate_and_evaluate`：先生成，再立即评测
+
+推荐使用配置文件驱动，示例见 [config.example.json](/D:/Code/questio_recommendation/evals/config.example.json)。
+
+### 只生成
+
+```bash
+python evals/run_eval.py --config evals/config.example.json --mode generate
+```
+
+### 只评测
+
+```bash
+python evals/run_eval.py --config evals/config.example.json --mode evaluate
+```
+
+### 生成并评测
+
+```bash
+python evals/run_eval.py --config evals/config.example.json --mode generate_and_evaluate
+```
+
+### CLI 覆盖配置
+
+命令行参数会覆盖 `config.json` 中的同名配置，例如：
+
+```bash
+python evals/run_eval.py ^
+  --config evals/config.example.json ^
+  --mode evaluate ^
+  --dataset evals/next_step_eval_v3.jsonl ^
+  --output reports/eval_report_v3.json ^
+  --concurrency 12 ^
+  --gen-model qwen3.5-35b-a3b ^
+  --judge-model deepseek-chat
 ```

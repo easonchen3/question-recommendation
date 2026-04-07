@@ -20,6 +20,7 @@ SRC_DIR = ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from generate_eval_set import generate_dataset, print_summary
 from next_question_reco import RECOMMENDATION_SYSTEM_PROMPT, build_recommendation_user_prompt
 
 
@@ -71,6 +72,29 @@ class ModelConfig:
     base_url: str
     temperature: float
     timeout: float
+
+
+def load_config_file(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    with Path(path).open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def nested_get(payload: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    current: Any = payload
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
+def coalesce(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -392,26 +416,114 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def build_model_config(model: str, base_url: str, api_key_env: str, temperature: float, timeout: float) -> ModelConfig:
-    api_key = os.getenv(api_key_env, "")
+def resolve_api_key(api_key: str | None, api_key_env: str | None) -> str:
+    if api_key:
+        return api_key
+    if api_key_env:
+        value = os.getenv(api_key_env, "")
+        if value:
+            return value
+    raise ValueError(f"Missing API key. Checked api_key and environment variable: {api_key_env}")
+
+
+def build_model_config(
+    model: str,
+    base_url: str,
+    api_key_env: str | None,
+    temperature: float,
+    timeout: float,
+    api_key: str | None = None,
+) -> ModelConfig:
+    api_key = resolve_api_key(api_key, api_key_env)
     if not api_key:
         raise ValueError(f"Missing API key in environment variable: {api_key_env}")
     return ModelConfig(model=model, api_key=api_key, base_url=base_url, temperature=temperature, timeout=timeout)
+
+
+def resolve_runtime_args(cli_args: argparse.Namespace) -> argparse.Namespace:
+    config = load_config_file(cli_args.config)
+
+    mode = coalesce(cli_args.mode, config.get("mode"), "evaluate")
+    dataset = coalesce(cli_args.dataset, nested_get(config, "evaluate", "dataset"), "evals/next_step_eval_v3.jsonl")
+    generate_output = coalesce(cli_args.generate_output, nested_get(config, "generate", "output"), dataset)
+    eval_output = coalesce(cli_args.output, nested_get(config, "evaluate", "output"), "reports/eval_report.json")
+    concurrency = int(coalesce(cli_args.concurrency, nested_get(config, "evaluate", "concurrency"), 8))
+    max_cases = int(coalesce(cli_args.max_cases, nested_get(config, "evaluate", "max_cases"), 0))
+    timeout = float(coalesce(cli_args.timeout, nested_get(config, "evaluate", "timeout"), 120.0))
+    dry_run = bool(cli_args.dry_run or bool(nested_get(config, "evaluate", "dry_run", default=False)))
+
+    gen_model = coalesce(cli_args.gen_model, nested_get(config, "evaluate", "generation_model", "model"), "gpt-4.1-mini")
+    gen_base_url = coalesce(
+        cli_args.gen_base_url,
+        nested_get(config, "evaluate", "generation_model", "base_url"),
+        os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    )
+    gen_api_key_env = coalesce(cli_args.gen_api_key_env, nested_get(config, "evaluate", "generation_model", "api_key_env"), "OPENAI_API_KEY")
+    gen_api_key = coalesce(cli_args.gen_api_key, nested_get(config, "evaluate", "generation_model", "api_key"))
+    gen_temperature = float(coalesce(cli_args.gen_temperature, nested_get(config, "evaluate", "generation_model", "temperature"), 0.2))
+
+    judge_model = coalesce(cli_args.judge_model, nested_get(config, "evaluate", "judge_model", "model"), "gpt-4.1")
+    judge_base_url = coalesce(
+        cli_args.judge_base_url,
+        nested_get(config, "evaluate", "judge_model", "base_url"),
+        os.getenv("JUDGE_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")),
+    )
+    judge_api_key_env = coalesce(cli_args.judge_api_key_env, nested_get(config, "evaluate", "judge_model", "api_key_env"), "JUDGE_API_KEY")
+    judge_api_key = coalesce(cli_args.judge_api_key, nested_get(config, "evaluate", "judge_model", "api_key"))
+    judge_temperature = float(coalesce(cli_args.judge_temperature, nested_get(config, "evaluate", "judge_model", "temperature"), 0.0))
+
+    return argparse.Namespace(
+        config=cli_args.config,
+        mode=mode,
+        dataset=dataset,
+        generate_output=generate_output,
+        output=eval_output,
+        concurrency=concurrency,
+        max_cases=max_cases,
+        dry_run=dry_run,
+        timeout=timeout,
+        gen_model=gen_model,
+        gen_base_url=gen_base_url,
+        gen_api_key_env=gen_api_key_env,
+        gen_api_key=gen_api_key,
+        gen_temperature=gen_temperature,
+        judge_model=judge_model,
+        judge_base_url=judge_base_url,
+        judge_api_key_env=judge_api_key_env,
+        judge_api_key=judge_api_key,
+        judge_temperature=judge_temperature,
+    )
 
 
 async def run_async(args: argparse.Namespace) -> dict[str, Any]:
     dataset = load_jsonl(Path(args.dataset))
     if args.max_cases:
         dataset = dataset[: args.max_cases]
+    if not dataset:
+        raise ValueError(f"Dataset is empty: {args.dataset}")
 
     gen_client: OpenAICompatibleClient | None = None
     judge_client: OpenAICompatibleClient | None = None
     if not args.dry_run:
         gen_client = OpenAICompatibleClient(
-            build_model_config(args.gen_model, args.gen_base_url, args.gen_api_key_env, args.gen_temperature, args.timeout)
+            build_model_config(
+                args.gen_model,
+                args.gen_base_url,
+                args.gen_api_key_env,
+                args.gen_temperature,
+                args.timeout,
+                api_key=args.gen_api_key,
+            )
         )
         judge_client = OpenAICompatibleClient(
-            build_model_config(args.judge_model, args.judge_base_url, args.judge_api_key_env, args.judge_temperature, args.timeout)
+            build_model_config(
+                args.judge_model,
+                args.judge_base_url,
+                args.judge_api_key_env,
+                args.judge_temperature,
+                args.timeout,
+                api_key=args.judge_api_key,
+            )
         )
 
     semaphore = asyncio.Semaphore(args.concurrency)
@@ -438,25 +550,39 @@ async def run_async(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run next-step-question evaluation.")
-    parser.add_argument("--dataset", default="evals/next_step_eval_v1.jsonl")
-    parser.add_argument("--output", default="reports/eval_report.json")
-    parser.add_argument("--concurrency", type=int, default=8)
-    parser.add_argument("--max-cases", type=int, default=0)
+    parser = argparse.ArgumentParser(description="Run next-step-question dataset generation and evaluation.")
+    parser.add_argument("--config")
+    parser.add_argument("--mode", choices=["generate", "evaluate", "generate_and_evaluate"])
+    parser.add_argument("--generate-output")
+    parser.add_argument("--dataset")
+    parser.add_argument("--output")
+    parser.add_argument("--concurrency", type=int)
+    parser.add_argument("--max-cases", type=int)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--timeout", type=float)
 
-    parser.add_argument("--gen-model", default="gpt-4.1-mini")
-    parser.add_argument("--gen-base-url", default=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-    parser.add_argument("--gen-api-key-env", default="OPENAI_API_KEY")
-    parser.add_argument("--gen-temperature", type=float, default=0.2)
+    parser.add_argument("--gen-model")
+    parser.add_argument("--gen-base-url")
+    parser.add_argument("--gen-api-key-env")
+    parser.add_argument("--gen-api-key")
+    parser.add_argument("--gen-temperature", type=float)
 
-    parser.add_argument("--judge-model", default="gpt-4.1")
-    parser.add_argument("--judge-base-url", default=os.getenv("JUDGE_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")))
-    parser.add_argument("--judge-api-key-env", default="JUDGE_API_KEY")
-    parser.add_argument("--judge-temperature", type=float, default=0.0)
+    parser.add_argument("--judge-model")
+    parser.add_argument("--judge-base-url")
+    parser.add_argument("--judge-api-key-env")
+    parser.add_argument("--judge-api-key")
+    parser.add_argument("--judge-temperature", type=float)
 
-    args = parser.parse_args()
+    cli_args = parser.parse_args()
+    args = resolve_runtime_args(cli_args)
+
+    if args.mode in {"generate", "generate_and_evaluate"}:
+        generation_summary = generate_dataset(args.generate_output)
+        print_summary(generation_summary)
+        if args.mode == "generate":
+            return
+        args.dataset = args.generate_output
+
     report = asyncio.run(run_async(args))
 
     output_path = Path(args.output)

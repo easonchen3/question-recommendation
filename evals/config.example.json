@@ -1,0 +1,26 @@
+{
+  "mode": "generate_and_evaluate",
+  "generate": {
+    "output": "evals/next_step_eval_v3.jsonl"
+  },
+  "evaluate": {
+    "dataset": "evals/next_step_eval_v3.jsonl",
+    "output": "reports/eval_report.json",
+    "concurrency": 8,
+    "max_cases": 0,
+    "dry_run": false,
+    "timeout": 180,
+    "generation_model": {
+      "model": "qwen3.5-35b-a3b",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "temperature": 0.0
+    },
+    "judge_model": {
+      "model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "JUDGE_API_KEY",
+      "temperature": 0.0
+    }
+  }
+}
