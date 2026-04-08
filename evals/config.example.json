@@ -1,10 +1,10 @@
 {
   "mode": "generate_and_evaluate",
   "generate": {
-    "output": "evals/next_step_eval_v3.jsonl"
+    "output": "evals/评测集.xlsx"
   },
   "evaluate": {
-    "dataset": "evals/next_step_eval_v3.jsonl",
+    "dataset": "evals/评测集.xlsx",
     "output": "reports/eval_report.json",
     "concurrency": 8,
     "max_cases": 0,

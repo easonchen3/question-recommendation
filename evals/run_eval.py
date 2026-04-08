@@ -20,49 +20,8 @@ SRC_DIR = ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from generate_eval_set import generate_dataset, print_summary
-from next_question_reco import RECOMMENDATION_SYSTEM_PROMPT, build_recommendation_user_prompt
-
-
-JUDGE_SYSTEM_PROMPT = """你是通信领域 Agent 评测专家，负责评估“下一步问题推荐”结果的质量。
-
-请重点判断生成结果是不是“下一步问题”，而不是泛泛的相关问题。
-重点关注：
-1. 与当前问题和上下文是否强相关
-2. 是否承接当前计划和执行结果
-3. 是否符合当前意图/skill；如果是多意图，要看是否至少贴合主执行方向，且尽量兼顾多个意图
-4. 是否保持通信领域语境
-5. 是否与历史高频问题、彼此之间重复
-6. 计算 Top3 命中：只要生成的 3 个问题里有 1 个与参考答案中的任意一个在语义上等价或明显同向、且属于同一个“下一步推进动作”，则 top3_hit = 1，否则 = 0
-
-评分维度（0-10）：
-- relevance
-- next_step
-- skill_alignment
-- telecom_fit
-- non_redundancy
-
-输出严格 JSON：
-{
-  "dimension_scores": {
-    "relevance": 0,
-    "next_step": 0,
-    "skill_alignment": 0,
-    "telecom_fit": 0,
-    "non_redundancy": 0
-  },
-  "top3_hit": 0,
-  "matched_questions": [
-    {
-      "generated": "...",
-      "reference": "..."
-    }
-  ],
-  "overall_score": 0,
-  "strengths": ["..."],
-  "issues": ["..."]
-}
-"""
+from generate_eval_set import DEFAULT_DATASET_PATH, generate_dataset, load_dataset, print_summary
+from next_question_reco import JUDGE_SYSTEM_PROMPT, RECOMMENDATION_SYSTEM_PROMPT, build_recommendation_user_prompt
 
 
 @dataclass
@@ -95,11 +54,6 @@ def coalesce(*values: Any) -> Any:
         if value is not None:
             return value
     return None
-
-
-def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    with path.open("r", encoding="utf-8") as handle:
-        return [json.loads(line) for line in handle if line.strip()]
 
 
 def ensure_parent(path: Path) -> None:
@@ -440,37 +394,34 @@ def build_model_config(
     return ModelConfig(model=model, api_key=api_key, base_url=base_url, temperature=temperature, timeout=timeout)
 
 
+def resolve_model_settings(config: dict[str, Any], section: str, *, dry_run: bool) -> dict[str, Any]:
+    settings = nested_get(config, "evaluate", section, default={}) or {}
+    if dry_run:
+        return settings
+    if not settings:
+        raise ValueError(f"Missing evaluate.{section} in config file.")
+    required = ("model", "base_url", "temperature")
+    missing = [key for key in required if settings.get(key) is None]
+    if missing:
+        raise ValueError(f"Missing fields in evaluate.{section}: {', '.join(missing)}")
+    if settings.get("api_key") is None and settings.get("api_key_env") is None:
+        raise ValueError(f"evaluate.{section} must provide api_key or api_key_env")
+    return settings
+
+
 def resolve_runtime_args(cli_args: argparse.Namespace) -> argparse.Namespace:
     config = load_config_file(cli_args.config)
 
     mode = coalesce(cli_args.mode, config.get("mode"), "evaluate")
-    dataset = coalesce(cli_args.dataset, nested_get(config, "evaluate", "dataset"), "evals/next_step_eval_v3.jsonl")
+    dataset = coalesce(cli_args.dataset, nested_get(config, "evaluate", "dataset"), DEFAULT_DATASET_PATH)
     generate_output = coalesce(cli_args.generate_output, nested_get(config, "generate", "output"), dataset)
     eval_output = coalesce(cli_args.output, nested_get(config, "evaluate", "output"), "reports/eval_report.json")
     concurrency = int(coalesce(cli_args.concurrency, nested_get(config, "evaluate", "concurrency"), 8))
     max_cases = int(coalesce(cli_args.max_cases, nested_get(config, "evaluate", "max_cases"), 0))
     timeout = float(coalesce(cli_args.timeout, nested_get(config, "evaluate", "timeout"), 120.0))
     dry_run = bool(cli_args.dry_run or bool(nested_get(config, "evaluate", "dry_run", default=False)))
-
-    gen_model = coalesce(cli_args.gen_model, nested_get(config, "evaluate", "generation_model", "model"), "gpt-4.1-mini")
-    gen_base_url = coalesce(
-        cli_args.gen_base_url,
-        nested_get(config, "evaluate", "generation_model", "base_url"),
-        os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-    )
-    gen_api_key_env = coalesce(cli_args.gen_api_key_env, nested_get(config, "evaluate", "generation_model", "api_key_env"), "OPENAI_API_KEY")
-    gen_api_key = coalesce(cli_args.gen_api_key, nested_get(config, "evaluate", "generation_model", "api_key"))
-    gen_temperature = float(coalesce(cli_args.gen_temperature, nested_get(config, "evaluate", "generation_model", "temperature"), 0.2))
-
-    judge_model = coalesce(cli_args.judge_model, nested_get(config, "evaluate", "judge_model", "model"), "gpt-4.1")
-    judge_base_url = coalesce(
-        cli_args.judge_base_url,
-        nested_get(config, "evaluate", "judge_model", "base_url"),
-        os.getenv("JUDGE_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")),
-    )
-    judge_api_key_env = coalesce(cli_args.judge_api_key_env, nested_get(config, "evaluate", "judge_model", "api_key_env"), "JUDGE_API_KEY")
-    judge_api_key = coalesce(cli_args.judge_api_key, nested_get(config, "evaluate", "judge_model", "api_key"))
-    judge_temperature = float(coalesce(cli_args.judge_temperature, nested_get(config, "evaluate", "judge_model", "temperature"), 0.0))
+    generation_model = resolve_model_settings(config, "generation_model", dry_run=dry_run)
+    judge_model = resolve_model_settings(config, "judge_model", dry_run=dry_run)
 
     return argparse.Namespace(
         config=cli_args.config,
@@ -482,21 +433,13 @@ def resolve_runtime_args(cli_args: argparse.Namespace) -> argparse.Namespace:
         max_cases=max_cases,
         dry_run=dry_run,
         timeout=timeout,
-        gen_model=gen_model,
-        gen_base_url=gen_base_url,
-        gen_api_key_env=gen_api_key_env,
-        gen_api_key=gen_api_key,
-        gen_temperature=gen_temperature,
+        generation_model=generation_model,
         judge_model=judge_model,
-        judge_base_url=judge_base_url,
-        judge_api_key_env=judge_api_key_env,
-        judge_api_key=judge_api_key,
-        judge_temperature=judge_temperature,
     )
 
 
 async def run_async(args: argparse.Namespace) -> dict[str, Any]:
-    dataset = load_jsonl(Path(args.dataset))
+    dataset = load_dataset(args.dataset)
     if args.max_cases:
         dataset = dataset[: args.max_cases]
     if not dataset:
@@ -507,22 +450,22 @@ async def run_async(args: argparse.Namespace) -> dict[str, Any]:
     if not args.dry_run:
         gen_client = OpenAICompatibleClient(
             build_model_config(
-                args.gen_model,
-                args.gen_base_url,
-                args.gen_api_key_env,
-                args.gen_temperature,
+                args.generation_model["model"],
+                args.generation_model["base_url"],
+                args.generation_model.get("api_key_env"),
+                float(args.generation_model["temperature"]),
                 args.timeout,
-                api_key=args.gen_api_key,
+                api_key=args.generation_model.get("api_key"),
             )
         )
         judge_client = OpenAICompatibleClient(
             build_model_config(
-                args.judge_model,
-                args.judge_base_url,
-                args.judge_api_key_env,
-                args.judge_temperature,
+                args.judge_model["model"],
+                args.judge_model["base_url"],
+                args.judge_model.get("api_key_env"),
+                float(args.judge_model["temperature"]),
                 args.timeout,
-                api_key=args.judge_api_key,
+                api_key=args.judge_model.get("api_key"),
             )
         )
 
@@ -541,8 +484,8 @@ async def run_async(args: argparse.Namespace) -> dict[str, Any]:
             "dataset": args.dataset,
             "dry_run": args.dry_run,
             "concurrency": args.concurrency,
-            "gen_model": args.gen_model,
-            "judge_model": args.judge_model,
+            "gen_model": args.generation_model.get("model"),
+            "judge_model": args.judge_model.get("model"),
         },
         "summary": aggregate(results),
         "results": results,
@@ -560,18 +503,6 @@ def main() -> None:
     parser.add_argument("--max-cases", type=int)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--timeout", type=float)
-
-    parser.add_argument("--gen-model")
-    parser.add_argument("--gen-base-url")
-    parser.add_argument("--gen-api-key-env")
-    parser.add_argument("--gen-api-key")
-    parser.add_argument("--gen-temperature", type=float)
-
-    parser.add_argument("--judge-model")
-    parser.add_argument("--judge-base-url")
-    parser.add_argument("--judge-api-key-env")
-    parser.add_argument("--judge-api-key")
-    parser.add_argument("--judge-temperature", type=float)
 
     cli_args = parser.parse_args()
     args = resolve_runtime_args(cli_args)

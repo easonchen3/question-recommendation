@@ -5,7 +5,28 @@ import json
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
+
+from openpyxl import Workbook, load_workbook
+
+
+DEFAULT_DATASET_PATH = "evals/评测集.xlsx"
+EXCEL_HEADERS = [
+    "编号",
+    "original_question",
+    "rewritten_question",
+    "intent",
+    "difficulty",
+    "user_profile",
+    "current_plan",
+    "execution_result",
+    "history_high_freq_questions",
+    "reference_top3",
+    "evaluation_focus",
+    "scenario_family",
+    "region",
+    "intent_mode",
+]
 
 
 TOTAL_CASES = 120
@@ -204,11 +225,122 @@ def build_cases() -> Iterable[dict]:
             case_id += 1
 
 
-def write_jsonl(cases: list[dict], output_path: Path) -> None:
+def serialize_excel_list(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return "\n".join(str(item) for item in value if str(item).strip())
+    return str(value)
+
+
+def parse_excel_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    text = str(value).strip()
+    if not text:
+        return []
+
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def clean_cell_text(value: Any) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def normalize_intent_from_excel(value: Any) -> str | list[str]:
+    values = parse_excel_list(value)
+    if not values:
+        return ""
+    return values if len(values) > 1 else values[0]
+
+
+def case_to_excel_row(case: dict[str, Any]) -> list[Any]:
+    return [
+        case["id"],
+        case["input"]["original_question"],
+        case["input"]["rewritten_question"],
+        serialize_excel_list(case["intent"]),
+        case["difficulty"],
+        serialize_excel_list(case["input"].get("user_profile") or []),
+        serialize_excel_list(case["input"].get("current_plan") or []),
+        case["input"].get("execution_result", ""),
+        serialize_excel_list(case["input"].get("history_high_freq_questions") or []),
+        serialize_excel_list(case["expected"].get("top3") or []),
+        serialize_excel_list(case["expected"].get("evaluation_focus") or []),
+        case["meta"].get("scenario_family", ""),
+        case["meta"].get("region", ""),
+        case["meta"].get("intent_mode", ""),
+    ]
+
+
+def row_to_case(row: dict[str, Any]) -> dict[str, Any]:
+    intent_value = normalize_intent_from_excel(row.get("intent"))
+    return {
+        "id": clean_cell_text(row.get("编号") or row.get("id")),
+        "intent": intent_value,
+        "difficulty": clean_cell_text(row.get("difficulty")),
+        "input": {
+            "original_question": clean_cell_text(row.get("original_question")),
+            "rewritten_question": clean_cell_text(row.get("rewritten_question")),
+            "intent": intent_value,
+            "user_profile": parse_excel_list(row.get("user_profile")),
+            "current_plan": parse_excel_list(row.get("current_plan")),
+            "execution_result": clean_cell_text(row.get("execution_result")),
+            "history_high_freq_questions": parse_excel_list(row.get("history_high_freq_questions")),
+        },
+        "expected": {
+            "top3": parse_excel_list(row.get("reference_top3")),
+            "evaluation_focus": parse_excel_list(row.get("evaluation_focus")),
+        },
+        "meta": {
+            "scenario_family": clean_cell_text(row.get("scenario_family")),
+            "region": clean_cell_text(row.get("region")),
+            "intent_mode": clean_cell_text(row.get("intent_mode")) or ("multi" if isinstance(intent_value, list) else "single"),
+        },
+    }
+
+
+def write_excel(cases: list[dict[str, Any]], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as f:
-        for row in cases:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "评测集"
+    worksheet.append(EXCEL_HEADERS)
+    for case in cases:
+        worksheet.append(case_to_excel_row(case))
+    workbook.save(output_path)
+
+
+def load_excel_dataset(path: Path) -> list[dict[str, Any]]:
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    worksheet = workbook[workbook.sheetnames[0]]
+    rows = worksheet.iter_rows(values_only=True)
+    headers = [str(cell).strip() if cell is not None else "" for cell in next(rows, [])]
+    cases: list[dict[str, Any]] = []
+    for values in rows:
+        row = dict(zip(headers, values, strict=False))
+        if not any(value is not None and str(value).strip() for value in values):
+            continue
+        cases.append(row_to_case(row))
+    return cases
+
+
+def load_dataset(path: str | Path) -> list[dict[str, Any]]:
+    dataset_path = Path(path)
+    if dataset_path.suffix.lower() != ".xlsx":
+        raise ValueError(f"Only .xlsx dataset files are supported now: {dataset_path}")
+    return load_excel_dataset(dataset_path)
 
 
 def summarize_cases(cases: list[dict]) -> dict[str, object]:
@@ -229,12 +361,14 @@ def print_summary(summary: dict[str, object]) -> None:
     print(f"Multi-intent cases: {summary['multi_intent_cases']}")
 
 
-def generate_dataset(output: str | Path = "evals/next_step_eval_v3.jsonl") -> dict[str, object]:
+def generate_dataset(output: str | Path = DEFAULT_DATASET_PATH) -> dict[str, object]:
     cases = list(build_cases())
     if len(cases) != TOTAL_CASES:
         raise ValueError(f"Expected {TOTAL_CASES} cases, got {len(cases)}")
     output_path = Path(output)
-    write_jsonl(cases, output_path)
+    if output_path.suffix.lower() != ".xlsx":
+        raise ValueError(f"Only .xlsx output files are supported now: {output_path}")
+    write_excel(cases, output_path)
     summary = summarize_cases(cases)
     summary["output"] = str(output_path)
     return summary
@@ -242,7 +376,7 @@ def generate_dataset(output: str | Path = "evals/next_step_eval_v3.jsonl") -> di
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate telecom next-step-question evaluation set v3.")
-    parser.add_argument("--output", default="evals/next_step_eval_v3.jsonl")
+    parser.add_argument("--output", default=DEFAULT_DATASET_PATH)
     args = parser.parse_args()
     summary = generate_dataset(args.output)
     print_summary(summary)

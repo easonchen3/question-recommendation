@@ -6,6 +6,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from openpyxl import Workbook
+
 
 def load_report(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
@@ -90,11 +92,48 @@ def build_markdown(report_path: Path, summary: dict[str, Any], failed: list[dict
     return "\n".join(lines)
 
 
+def write_failure_excel(path: Path, failed: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "失败样本"
+    worksheet.append(
+        [
+            "id",
+            "intent",
+            "difficulty",
+            "scenario_family",
+            "failure_tags",
+            "generated_questions",
+            "reference_top3",
+            "judge_issues",
+            "judge_overall_score",
+            "final_score",
+        ]
+    )
+    for item in failed:
+        worksheet.append(
+            [
+                item.get("id", ""),
+                intent_key(item.get("intent")),
+                item.get("difficulty", ""),
+                item.get("meta", {}).get("scenario_family", ""),
+                "\n".join(classify_failure(item)),
+                "\n".join(item.get("generated_questions", [])),
+                "\n".join(item.get("reference_top3", [])),
+                "\n".join(item.get("judge", {}).get("issues", [])),
+                item.get("judge", {}).get("overall_score", ""),
+                item.get("final_score", ""),
+            ]
+        )
+    workbook.save(path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze failed cases from an evaluation report.")
     parser.add_argument("--report", required=True)
     parser.add_argument("--markdown-output", required=True)
-    parser.add_argument("--jsonl-output", required=True)
+    parser.add_argument("--excel-output", required=True)
     args = parser.parse_args()
 
     report_path = Path(args.report)
@@ -107,17 +146,12 @@ def main() -> None:
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
     markdown_path.write_text(markdown, encoding="utf-8")
 
-    jsonl_path = Path(args.jsonl_output)
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-    with jsonl_path.open("w", encoding="utf-8") as handle:
-        for item in failed:
-            enriched = dict(item)
-            enriched["failure_tags"] = classify_failure(item)
-            handle.write(json.dumps(enriched, ensure_ascii=False) + "\n")
+    excel_path = Path(args.excel_output)
+    write_failure_excel(excel_path, failed)
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"Saved markdown to: {markdown_path}")
-    print(f"Saved jsonl to: {jsonl_path}")
+    print(f"Saved excel to: {excel_path}")
 
 
 if __name__ == "__main__":

@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
 
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
-SYSTEM_PROMPT_PATH = PROMPTS_DIR / "next_step_question_recommendation_system_prompt.txt"
-USER_PROMPT_TEMPLATE_PATH = PROMPTS_DIR / "next_step_question_recommendation_user_prompt.txt"
+GENERATION_PROMPT_ARCHIVE_PATH = PROMPTS_DIR / "generation_prompt_archive.md"
+EVALUATION_PROMPT_ARCHIVE_PATH = PROMPTS_DIR / "evaluation_prompt_archive.md"
 
 
-RECOMMENDATION_SYSTEM_PROMPT = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
-USER_PROMPT_TEMPLATE = USER_PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
+def _extract_markdown_code_block(markdown: str, heading: str) -> str:
+    pattern = rf"## {re.escape(heading)}\s+```[a-zA-Z0-9_-]*\n(.*?)\n```"
+    match = re.search(pattern, markdown, flags=re.DOTALL)
+    if not match:
+        raise ValueError(f"Cannot find prompt section '{heading}' in markdown archive.")
+    return match.group(1).strip()
+
+
+GENERATION_PROMPT_ARCHIVE = GENERATION_PROMPT_ARCHIVE_PATH.read_text(encoding="utf-8")
+EVALUATION_PROMPT_ARCHIVE = EVALUATION_PROMPT_ARCHIVE_PATH.read_text(encoding="utf-8")
+
+RECOMMENDATION_SYSTEM_PROMPT = _extract_markdown_code_block(GENERATION_PROMPT_ARCHIVE, "System Prompt")
+USER_PROMPT_TEMPLATE = _extract_markdown_code_block(GENERATION_PROMPT_ARCHIVE, "User Prompt Template")
+JUDGE_SYSTEM_PROMPT = _extract_markdown_code_block(EVALUATION_PROMPT_ARCHIVE, "Judge System Prompt")
 
 
 def _serialize_prompt_value(value: Any) -> str:
